@@ -33,6 +33,7 @@ import (
 
 	v1 "github.com/perses/perses/pkg/client/api/v1"
 	clientConfig "github.com/perses/perses/pkg/client/config"
+	persesapi "github.com/perses/perses/pkg/model/api"
 	"github.com/perses/perses/pkg/model/api/v1/secret"
 	speccommon "github.com/perses/spec/go/common"
 
@@ -149,6 +150,18 @@ func configFingerprint(perses persesv1alpha2.Perses) string {
 		}
 		fmt.Fprintf(&b, "oauth=type:%s,name:%s,ns:%s,tokenURL:%s,idPath:%s,", oauth.Type, oauthName, oauthNS, oauth.TokenURL, clientIDPath)
 	}
+	if isClientBasicAuthEnabled(&perses) {
+		ba := perses.Spec.Client.BasicAuth
+		baName := ""
+		if ba.Name != nil {
+			baName = *ba.Name
+		}
+		baNS := ""
+		if ba.Namespace != nil {
+			baNS = *ba.Namespace
+		}
+		fmt.Fprintf(&b, "basicAuth=type:%s,name:%s,ns:%s,user:%s,pwPath:%s,", ba.Type, baName, baNS, ba.Username, ba.PasswordPath)
+	}
 	serverURLFlag := flag.Lookup(PersesServerURLFlag)
 	if serverURLFlag != nil {
 		fmt.Fprintf(&b, "serverURL=%s,", serverURLFlag.Value.String())
@@ -189,6 +202,12 @@ func (f *PersesClientFactoryWithConfig) buildBaseConfig(ctx context.Context, k8s
 
 	if isKubernetesAuthEnabled(perses) && isClientOAuthEnabled(perses) {
 		return config, fmt.Errorf("kubernetesAuth and oauth are mutually exclusive; cannot configure both for Perses %s/%s", perses.Namespace, perses.Name)
+	}
+	if isKubernetesAuthEnabled(perses) && isClientBasicAuthEnabled(perses) {
+		return config, fmt.Errorf("kubernetesAuth and basicAuth are mutually exclusive; cannot configure both for Perses %s/%s", perses.Namespace, perses.Name)
+	}
+	if isClientOAuthEnabled(perses) && isClientBasicAuthEnabled(perses) {
+		return config, fmt.Errorf("oauth and basicAuth are mutually exclusive; cannot configure both for Perses %s/%s", perses.Namespace, perses.Name)
 	}
 
 	if isKubernetesAuthEnabled(perses) {
@@ -261,6 +280,44 @@ func (f *PersesClientFactoryWithConfig) buildBaseConfig(ctx context.Context, k8s
 		}
 
 		config.TLSConfig = tlsConfig
+	}
+
+	if isClientBasicAuthEnabled(perses) {
+		ba := perses.Spec.Client.BasicAuth
+		if ba.Username == "" {
+			return config, fmt.Errorf("username is required for basicAuth on Perses %s/%s", perses.Namespace, perses.Name)
+		}
+		if ba.PasswordPath == "" {
+			return config, fmt.Errorf("passwordPath is required for basicAuth on Perses %s/%s", perses.Namespace, perses.Name)
+		}
+
+		var password string
+		switch ba.Type {
+		case persesv1alpha2.SecretSourceTypeSecret, persesv1alpha2.SecretSourceTypeConfigMap:
+			var err error
+			password, err = GetBasicAuthData(ctx, k8sClient, perses.Namespace, perses.Name, ba)
+			if err != nil {
+				return config, err
+			}
+		case persesv1alpha2.SecretSourceTypeFile:
+			passwordBytes, err := ReadSecretFile(ba.PasswordPath, f.allowedDirs)
+			if err != nil {
+				return config, fmt.Errorf("invalid basicAuth password file for Perses %s/%s: %w", perses.Namespace, perses.Name, err)
+			}
+			password = string(passwordBytes)
+		default:
+			return config, fmt.Errorf("unsupported basicAuth source type %q for Perses %s/%s", ba.Type, perses.Namespace, perses.Name)
+		}
+
+		if !isTLSEnabled(perses) {
+			clog.WithField("perses", fmt.Sprintf("%s/%s", perses.Namespace, perses.Name)).
+				Warn("Perses client basicAuth (native login) is configured over plaintext HTTP; enable TLS to protect credentials in transit")
+		}
+
+		config.NativeAuth = &persesapi.Auth{
+			Login:    ba.Username,
+			Password: password,
+		}
 	}
 
 	// OAuth 2.0 client_credentials: the token URL points at Perses's own native

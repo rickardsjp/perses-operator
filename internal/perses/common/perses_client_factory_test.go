@@ -1112,6 +1112,179 @@ func TestBuildClientTLSFile(t *testing.T) {
 	}
 }
 
+func TestBuildClientWithBasicAuth(t *testing.T) {
+	ctx := context.Background()
+
+	k8sSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "perses-basic-secret", Namespace: "perses-system"},
+		Data: map[string][]byte{
+			"password": []byte("native-secret-password"),
+		},
+	}
+	k8sCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "perses-basic-cm", Namespace: "perses-system"},
+		Data: map[string]string{
+			"password": "cm-password",
+		},
+	}
+	reader := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(k8sSecret, k8sCM).Build()
+
+	t.Run("secret source builds NativeAuth client", func(t *testing.T) {
+		perses := persesv1alpha2.Perses{
+			ObjectMeta: metav1.ObjectMeta{Name: "perses", Namespace: "perses-system", Generation: 1},
+			Spec: persesv1alpha2.PersesSpec{
+				ContainerPort: ptr.To(int32(8080)),
+				Client: &persesv1alpha2.Client{
+					BasicAuth: &persesv1alpha2.BasicAuth{
+						SecretSource: persesv1alpha2.SecretSource{
+							Type:      persesv1alpha2.SecretSourceTypeSecret,
+							Name:      ptr.To("perses-basic-secret"),
+							Namespace: ptr.To("perses-system"),
+						},
+						Username:     "admin",
+						PasswordPath: "password",
+					},
+				},
+			},
+		}
+
+		factory := NewWithConfig()
+		cl, err := factory.buildClient(ctx, reader, perses)
+		require.NoError(t, err)
+		require.NotNil(t, cl)
+		require.NotNil(t, cl.RESTClient())
+		assert.NotNil(t, cl.RESTClient().Client)
+	})
+
+	t.Run("configmap source builds NativeAuth client", func(t *testing.T) {
+		perses := persesv1alpha2.Perses{
+			ObjectMeta: metav1.ObjectMeta{Name: "perses", Namespace: "perses-system", Generation: 1},
+			Spec: persesv1alpha2.PersesSpec{
+				ContainerPort: ptr.To(int32(8080)),
+				Client: &persesv1alpha2.Client{
+					BasicAuth: &persesv1alpha2.BasicAuth{
+						SecretSource: persesv1alpha2.SecretSource{
+							Type:      persesv1alpha2.SecretSourceTypeConfigMap,
+							Name:      ptr.To("perses-basic-cm"),
+							Namespace: ptr.To("perses-system"),
+						},
+						Username:     "admin",
+						PasswordPath: "password",
+					},
+				},
+			},
+		}
+
+		factory := NewWithConfig()
+		cl, err := factory.buildClient(ctx, reader, perses)
+		require.NoError(t, err)
+		require.NotNil(t, cl)
+	})
+
+	t.Run("file source respects allowedDirs", func(t *testing.T) {
+		allowedDir := t.TempDir()
+		pwFile, err := os.CreateTemp(allowedDir, "basic-pw-*")
+		require.NoError(t, err)
+		_, err = pwFile.WriteString("file-password")
+		require.NoError(t, err)
+		require.NoError(t, pwFile.Close())
+
+		perses := persesv1alpha2.Perses{
+			ObjectMeta: metav1.ObjectMeta{Name: "perses", Namespace: "perses-system", Generation: 1},
+			Spec: persesv1alpha2.PersesSpec{
+				ContainerPort: ptr.To(int32(8080)),
+				Client: &persesv1alpha2.Client{
+					BasicAuth: &persesv1alpha2.BasicAuth{
+						SecretSource: persesv1alpha2.SecretSource{
+							Type: persesv1alpha2.SecretSourceTypeFile,
+						},
+						Username:     "admin",
+						PasswordPath: pwFile.Name(),
+					},
+				},
+			},
+		}
+
+		// Without allowedDirs -> rejected
+		factoryNoDirs := NewWithConfig()
+		_, err = factoryNoDirs.buildClient(ctx, reader, perses)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "file references in secrets are disabled")
+
+		// With allowedDirs -> succeeds
+		factoryWithDirs := NewWithConfig(allowedDir)
+		cl, err := factoryWithDirs.buildClient(ctx, reader, perses)
+		require.NoError(t, err)
+		require.NotNil(t, cl)
+	})
+
+	t.Run("fingerprint changes when basicAuth fields change", func(t *testing.T) {
+		base := persesv1alpha2.Perses{
+			ObjectMeta: metav1.ObjectMeta{Name: "perses", Namespace: "default", Generation: 1},
+		}
+		fpBase := configFingerprint(base)
+
+		withBA := base.DeepCopy()
+		withBA.Spec.Client = &persesv1alpha2.Client{
+			BasicAuth: &persesv1alpha2.BasicAuth{
+				SecretSource: persesv1alpha2.SecretSource{
+					Type: persesv1alpha2.SecretSourceTypeSecret,
+					Name: ptr.To("sec-1"),
+				},
+				Username:     "admin",
+				PasswordPath: "password",
+			},
+		}
+		fpBA := configFingerprint(*withBA)
+		assert.NotEqual(t, fpBase, fpBA)
+
+		diffUser := withBA.DeepCopy()
+		diffUser.Spec.Client.BasicAuth.Username = "other"
+		assert.NotEqual(t, fpBA, configFingerprint(*diffUser))
+	})
+
+	t.Run("basicAuth mutual exclusion with kubernetesAuth and oauth", func(t *testing.T) {
+		factory := NewWithConfig()
+
+		pK8s := persesv1alpha2.Perses{
+			ObjectMeta: metav1.ObjectMeta{Name: "perses", Namespace: "perses-system", Generation: 1},
+			Spec: persesv1alpha2.PersesSpec{
+				Client: &persesv1alpha2.Client{
+					KubernetesAuth: &persesv1alpha2.KubernetesAuth{Enable: ptr.To(true)},
+					BasicAuth: &persesv1alpha2.BasicAuth{
+						SecretSource: persesv1alpha2.SecretSource{Type: persesv1alpha2.SecretSourceTypeSecret},
+						Username:     "admin",
+						PasswordPath: "password",
+					},
+				},
+			},
+		}
+		_, err := factory.buildClient(ctx, reader, pK8s)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mutually exclusive")
+
+		pOAuth := persesv1alpha2.Perses{
+			ObjectMeta: metav1.ObjectMeta{Name: "perses", Namespace: "perses-system", Generation: 1},
+			Spec: persesv1alpha2.PersesSpec{
+				Client: &persesv1alpha2.Client{
+					OAuth: &persesv1alpha2.OAuth{
+						SecretSource: persesv1alpha2.SecretSource{Type: persesv1alpha2.SecretSourceTypeSecret},
+						TokenURL:     "http://perses:8080/token",
+					},
+					BasicAuth: &persesv1alpha2.BasicAuth{
+						SecretSource: persesv1alpha2.SecretSource{Type: persesv1alpha2.SecretSourceTypeSecret},
+						Username:     "admin",
+						PasswordPath: "password",
+					},
+				},
+			},
+		}
+		_, err = factory.buildClient(ctx, reader, pOAuth)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mutually exclusive")
+	})
+}
+
 func TestBuildClientKubernetesAuthAndOAuthConflict(t *testing.T) {
 	ctx := context.Background()
 	reader := fake.NewClientBuilder().WithScheme(newScheme()).Build()

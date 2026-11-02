@@ -167,9 +167,10 @@ exclusive with external OIDC providers.
 
 ---
 
-## `spec.client.basicAuth` — HTTP Basic Auth (v1alpha1)
+## `spec.client.basicAuth` — Perses Native Auth (v1alpha1 / v1alpha2)
 
 **Sample:** [`perses.dev_v1alpha1_perses_client_basic_auth.yaml`](perses.dev_v1alpha1_perses_client_basic_auth.yaml)
 
-The operator authenticates with a username and password. Requires `enable_native: true` in
-`spec.config.security.authentication.providers`.
+The operator authenticates against Perses's native login endpoint (`/api/auth/providers/native/login`)
+with a username and password to obtain and automatically refresh a Perses JWT. Requires
+`enable_native: true` in `spec.config.security.authentication.providers`.
