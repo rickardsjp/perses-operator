@@ -375,6 +375,7 @@ operator, depending on the field:
 | `Perses`                                      | `spec.client.tls.caCert`                                     | operator      |
 | `Perses`                                      | `spec.client.tls.userCert` (`certPath` and `privateKeyPath`) | operator      |
 | `Perses`                                      | `spec.client.oauth` (`clientIDPath` and `clientSecretPath`)  | operator      |
+| `Perses`                                      | `spec.client.basicAuth.passwordPath`                         | operator      |
 | `PersesDatasource` / `PersesGlobalDatasource` | `client.oauth.clientIDPath`                                  | operator      |
 | `PersesDatasource` / `PersesGlobalDatasource` | `client.oauth.clientSecretPath`                              | Perses server |
 | `PersesDatasource` / `PersesGlobalDatasource` | `client.basicAuth.passwordPath`                              | Perses server |
